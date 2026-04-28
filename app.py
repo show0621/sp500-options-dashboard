@@ -4,26 +4,36 @@ from PyPDF2 import PdfReader
 from openai import OpenAI
 
 # ==========================================
-# 1. 設定 Open WebUI 的連線資訊 (局內專用)
-# ==========================================
-OPEN_WEBUI_BASE_URL = "http://10.98.250.115:3000/api/v1"  
-OPEN_WEBUI_API_KEY = "sk-dummy-key-for-internal-use"  # 免驗證通關金鑰
-MODEL_NAME = "gemma4-e4b" 
-
-# 初始化 OpenAI 客戶端，將目標指向局內伺服器
-try:
-    client = OpenAI(
-        base_url=OPEN_WEBUI_BASE_URL,
-        api_key=OPEN_WEBUI_API_KEY
-    )
-except Exception as e:
-    st.error(f"AI 客戶端初始化失敗，請檢查網路連線：{e}")
-
-# ==========================================
-# 2. 網頁基本設定與輔助工具
+# 1. 網頁基本設定 (必須是第一個 Streamlit 指令)
 # ==========================================
 st.set_page_config(page_title="北區國稅局TP撰寫小助手", layout="wide")
 
+# ==========================================
+# 2. 設定 Open WebUI 連線資訊 (自動讀取後台機密)
+# ==========================================
+OPEN_WEBUI_BASE_URL = "http://10.98.250.115:3000/api/v1"  
+MODEL_NAME = "gemma4-e4b" 
+
+# 初始化 OpenAI 客戶端
+try:
+    # 這裡會自動去 Streamlit Cloud 後台的 Secrets 抓料金鑰
+    api_key = st.secrets["OPEN_WEBUI_API_KEY"]
+    
+    client = OpenAI(
+        base_url=OPEN_WEBUI_BASE_URL,
+        api_key=api_key
+    )
+except KeyError:
+    # 防呆機制：如果後台忘記設定，會跳出明確的錯誤提示並停止執行
+    st.error("❌ 找不到 API 金鑰！請至 Streamlit Cloud 後台的 'Settings' -> 'Secrets' 中設定 `OPEN_WEBUI_API_KEY`。")
+    st.stop()
+except Exception as e:
+    st.error(f"❌ AI 客戶端初始化失敗，請檢查網路連線：{e}")
+    st.stop()
+
+# ==========================================
+# 3. 輔助工具：萃取檔案文字
+# ==========================================
 def extract_text(uploaded_file):
     if uploaded_file is None: return ""
     try:
@@ -39,7 +49,7 @@ def extract_text(uploaded_file):
     return ""
 
 # ==========================================
-# 3. 核心 AI 生成邏輯
+# 4. 核心 AI 生成邏輯
 # ==========================================
 def generate_tp_report_with_ai(option, case_data, ref_data):
     # 防呆機制：如果沒有上傳範例，給予預設提示
@@ -83,10 +93,10 @@ def generate_tp_report_with_ai(option, case_data, ref_data):
         return f"連線內部 AI 發生錯誤，請確認 IP 網址是否正確且伺服器正常運作中。\n錯誤詳細資訊：{e}"
 
 # ==========================================
-# 4. 前端介面設計
+# 5. 前端介面設計
 # ==========================================
 st.title("🛡️ 北區國稅局 TP 撰寫小助手")
-st.info(f"🟢 已連線至局內 AI 伺服器 (模型: {MODEL_NAME})")
+st.info(f"🟢 已連線至 AI 伺服器 (模型: {MODEL_NAME} | 金鑰受保護)")
 
 with st.sidebar:
     st.header("⚙️ 功能選單")
@@ -108,7 +118,7 @@ user_input = st.text_area(
 )
 
 # ==========================================
-# 5. 執行與輸出區塊
+# 6. 執行與輸出區塊
 # ==========================================
 if st.button("🚀 產出貼身報告", type="primary"):
     if not user_input.strip():
