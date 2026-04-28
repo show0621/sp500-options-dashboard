@@ -1,15 +1,37 @@
 import streamlit as st
+from docx import Document
+from PyPDF2 import PdfReader
+import io
 
-# 設定網頁標題與圖示
+# 1. 設定網頁標題與版面
 st.set_page_config(page_title="北區國稅局TP撰寫小助手", layout="wide")
 
-# 自定義標題區
-st.title("🛡️ 北區國稅局 TP 撰寫小助手")
-st.info("本系統將參考既有範例規格，協助產出符合邏輯之移轉訂價相關報告初稿。")
+# 2. 檔案讀取輔助函式
+def extract_text_from_upload(uploaded_file):
+    if uploaded_file is None:
+        return ""
+    
+    file_details = uploaded_file.name.split(".")
+    extension = file_details[-1].lower()
+    
+    if extension == "docx":
+        doc = Document(uploaded_file)
+        return "\n".join([para.text for para in doc.paragraphs])
+    elif extension == "pdf":
+        reader = PdfReader(uploaded_file)
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text()
+        return text
+    return ""
 
-# --- 側邊欄：功能選擇 ---
+# 3. 標題與資訊區
+st.title("🛡️ 北區國稅局 TP 撰寫小助手")
+st.info("系統會參考您上傳的「範例規格」，針對個案內容進行貼身撰擬。")
+
+# 4. 側邊欄：功能選擇與範例上傳
 with st.sidebar:
-    st.header("功能選單")
+    st.header("⚙️ 功能選單")
     selected_option = st.radio(
         "請選擇要執行的功能：",
         [
@@ -19,70 +41,89 @@ with st.sidebar:
             "4. 常規交易原則查核撰擬"
         ]
     )
+    
     st.divider()
-    st.caption("建議操作：貼上個案資料後點擊『產出報告』。")
+    st.header("📂 參考範例上傳")
+    ref_file = st.file_uploader(
+        f"請上傳「{selected_option.split('. ')[1]}」的範例格式 (Word 或 PDF)",
+        type=["docx", "pdf"]
+    )
+    
+    if ref_file:
+        st.success(f"已讀取：{ref_file.name}")
+        # 提取範例文字備用
+        template_content = extract_text_from_upload(ref_file)
+    else:
+        st.warning("請上傳範例檔案以獲取最佳撰寫效果。")
+        template_content = ""
 
-# --- 核心邏輯區：定義範例規格與邏輯 ---
-# 提示：未來你可以將這些字串替換成你實際的公務範例
-def get_template_logic(feature_type):
-    if feature_type == "功能分析":
-        return "【範例邏輯：功能分析】應包含受控交易參與方之研發、採購、製造、銷售等職能描述，並區分主要與次要功能。"
-    elif feature_type == "風險分析":
-        return "【範例邏輯：風險分析】應涵蓋市場風險、庫存風險、信用風險等，並分析風險承擔者與補償機制。"
-    elif feature_type == "案況說明":
-        return "【範例邏輯：案況說明】需釐清交易流程圖、資金流向及各參與方之契約義務。"
-    elif feature_type == "查核撰擬":
-        return "【範例邏輯：查核撰擬】重點在於常規交易範圍之選取、可比性調整之合理性說明。"
-    return ""
-
-# --- 主要操作介面 ---
+# 5. 主要操作介面
 st.subheader(f"當前執行：{selected_option}")
 
-# 根據選項顯示說明
-description_map = {
-    "1. 功能分析報告撰擬": "請貼上「功能分析表格」內容（5000字以內）：",
-    "2. 風險分析報告撰擬": "請貼上「風險分析表格」內容（5000字以內）：",
-    "3. 常規交易原則案況說明": "請貼上「交易流程及背景」內容（5000字以內）：",
-    "4. 常規交易原則查核撰擬": "請貼上「受控交易說明」內容（5000字以內）："
+# 根據選項動態設定說明文字
+prompt_hints = {
+    "1. 功能分析報告撰擬": "請貼上個案之功能分析表格或職能描述：",
+    "2. 風險分析報告撰擬": "請貼上個案之風險分析數據或內容：",
+    "3. 常規交易原則案況說明": "請貼上個案交易背景與流程說明：",
+    "4. 常規交易原則查核撰擬": "請貼上受控交易之查核具體事證："
 }
 
 user_input = st.text_area(
-    description_map[selected_option],
-    height=350,
+    prompt_hints[selected_option],
+    height=300,
     max_chars=5000,
-    placeholder="在此貼上個案資料..."
+    placeholder="請在此貼上個案內容，系統將結合上傳之範例進行撰寫..."
 )
 
-# 按鈕觸發
+# 6. 報告產出邏輯
 if st.button("🚀 產出貼身報告", type="primary"):
     if not user_input.strip():
-        st.warning("請先輸入資料喔！")
-    else:
-        with st.spinner("正在結合範例規格與個案邏輯，請稍候..."):
-            # 這裡模擬報告生成的邏輯處理
-            feature_key = selected_option.split(". ")[1].replace("報告撰擬", "").replace("撰擬", "")
-            logic_ref = get_template_logic(feature_key)
-            
-            st.success("報告已產出！")
-            st.divider()
-            
-            # 顯示結果區塊
-            st.markdown("### 📄 產出報告結果 (草案)")
-            
-            # 範例輸出架構 (這部分可串接 LLM 或 規則替換)
-            result_content = f"""
-            ### {selected_option} - 個案報告
-            
-            **【參考範例邏輯】** {logic_ref}
-            
-            **【個案內容摘要】** {user_input[:200]}... (已根據個案貼身調整內容)
-            
-            **【報告建議草案】**
-            1. 依據本局查核範例規格，本案受控交易之實質經濟行為分析如下...
-            2. 針對個案所述之「{user_input[:20]}」，符合常規交易原則之說明如下...
-            3. 結論：本案經評估後，建議...
-            """
-            st.markdown(result_content)
-            
-            # 提供複製/下載按鈕
-            st.button("📋 複製報告全文", on_click=lambda: st.write("已模擬複製"))
+        st.error("請先貼上個案資料！")
+    elif not ref_file:
+        st.warning("提醒：您未上傳範例，系統將使用一般通用格式生成。")
+        
+    with st.spinner("正在分析範例規格並套用至個案中..."):
+        st.divider()
+        st.markdown("### 📄 產出報告結果 (草案)")
+        
+        # 這裡模擬 AI 結合「範例文字」與「個案文字」的邏輯
+        # 實務上您可以將 template_content 與 user_input 一併傳給 LLM API
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.caption("✅ 參考範例規格確認")
+            if template_content:
+                st.text_area("偵測到的範例文字片段：", template_content[:300] + "...", height=100, disabled=True)
+            else:
+                st.write("無上傳範例，使用系統預設邏輯。")
+        
+        with col2:
+            st.caption("✅ 個案資料摘要")
+            st.write(f"輸入字數：{len(user_input)} 字")
+
+        # 最終呈現區
+        st.success("報告撰寫完成！")
+        
+        final_draft = f"""
+        【{selected_option} - 擬稿】
+        
+        一、 依據您上傳之「{ref_file.name if ref_file else '通用規格'}」格式：
+        二、 針對本個案「{user_input[:20]}...」之查核意見如下：
+        
+        (以下為模擬生成的貼身報告內容)
+        1. 職能分析：經查本案參與方...
+        2. 風險分配：符合範例中關於{ "範例邏輯萃取" if ref_file else "一般常規" }之規範...
+        3. 結論：本案建議...
+        
+        --------------------------------------------
+        (以上內容可直接複製至 Word 進行後續微調)
+        """
+        st.info(final_draft)
+        
+        # 下載按鈕 (純文字版)
+        st.download_button(
+            label="📥 下載報告草案 (.txt)",
+            data=final_draft,
+            file_name=f"{selected_option}_產出結果.txt",
+            mime="text/plain"
+        )
