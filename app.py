@@ -1,4 +1,3 @@
-請按這個程式碼去新增不要動到其他功能和程式碼還有框架，找不到的部分請幫我重新找回來，可以去尋找這個網頁重新找回來
 import streamlit as st
 import yfinance as yf
 import pandas as pd
