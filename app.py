@@ -222,24 +222,35 @@ with st.sidebar:
         ("布林通道極限收租", "VCP 形態突破", "MACD 動能共振")
     )
     
+    # ---------------- 讀取機器人掃描的推薦名單 (動態過濾版) ----------------
     st.markdown("---")
-    st.header("🎯 S&P 500 共振推薦名單")
-    st.write("以下為系統背景掃描，符合動能共振之潛力標的：")
+    st.header("🎯 S&P 500 策略推薦清單")
+    st.write(f"以下為符合【{strategy_choice}】條件之潛力標的：")
     
     try:
         if os.path.exists('signals.csv'):
             signals_df = pd.read_csv('signals.csv')
             if not signals_df.empty:
-                st.dataframe(signals_df[['代碼', '當前價格', '支撐位 (建議 Sell Put 價)']], hide_index=True)
-                st.caption(f"最後更新日期：{signals_df.iloc[0]['日期']}")
-                st.info("💡 提示：點擊上方代碼輸入框，即可查看該檔股票的詳細回測與圖表。")
+                # 根據下拉選單選擇的策略，動態過濾推薦清單
+                if '符合策略' in signals_df.columns:
+                    filtered_df = signals_df[signals_df['符合策略'] == strategy_choice]
+                else:
+                    filtered_df = signals_df
+                    
+                if not filtered_df.empty:
+                    st.dataframe(filtered_df[['代碼', '當前價格', '支撐位 (建議 Sell Put 價)']], hide_index=True)
+                    st.caption(f"最後更新日期：{filtered_df.iloc[0]['日期']}")
+                    st.info("💡 提示：點擊上方代碼輸入框，即可查看該檔股票的詳細回測與圖表。")
+                else:
+                    st.write(f"今日無符合【{strategy_choice}】條件之標的。")
             else:
-                st.write("今日市場無符合多頭共振條件之標的。")
+                st.write("今日市場無符合條件之標的。")
         else:
             st.warning("尚未偵測到 `signals.csv`。")
             st.caption("請確認 GitHub Actions 的掃描腳本是否已經成功執行並寫入資料庫。")
     except Exception as e:
         st.error(f"讀取推薦清單時發生錯誤: {e}")
+    # --------------------------------------------------------------
 
 # 以下為單檔股票詳細分析與圖表繪製邏輯
 if ticker_input:
