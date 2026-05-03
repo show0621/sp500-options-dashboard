@@ -7,7 +7,7 @@ import datetime
 import os
 
 # ==========================================
-# 網頁與視覺風格設定 (日系文學風)
+# 網頁與視覺風格設定
 # ==========================================
 st.set_page_config(page_title="Alpha 櫻・美股共振展望", layout="wide", initial_sidebar_state="expanded")
 
@@ -19,147 +19,150 @@ st.markdown("""
     h1, h2, h3 { color: #34495E; font-weight: 300; letter-spacing: 2px; }
     .stApp { background: linear-gradient(135deg, #fdfbfb 0%, #ebedee 100%); }
     .metric-card { background-color: rgba(255, 255, 255, 0.8); border-radius: 10px; padding: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.03); border-left: 4px solid #85C1E9; }
-    .profit-text { color: #E74C3C; font-weight: bold; }
-    .loss-text { color: #27AE60; font-weight: bold; }
+    .highlight { color: #E74C3C; font-weight: bold; }
     </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 核心運算與 RSI + 支撐策略模組
+# 核心運算與回測模組
 # ==========================================
 @st.cache_data(ttl=3600)
 def fetch_data(ticker_symbol):
     ticker = yf.Ticker(ticker_symbol)
-    df_daily = ticker.history(period="2y", interval="1d") # 拉長到2年以利回測
+    df_daily = ticker.history(period="1y", interval="1d")
+    df_60m = ticker.history(period="1mo", interval="60m")
     news = ticker.news[:3] if hasattr(ticker, 'news') else []
     inst_holders = ticker.institutional_holders
-    return df_daily, news, inst_holders
+    return df_daily, df_60m, news, inst_holders
 
 def apply_technical_analysis(df):
     if df.empty or len(df) < 50: return df
-    # 趨勢均線
+    
+    # 均線與成交量均線
     df['SMA_20'] = df['Close'].rolling(window=20).mean()
     df['SMA_60'] = df['Close'].rolling(window=60).mean()
+    df['Vol_SMA_20'] = df['Volume'].rolling(window=20).mean()
     
-    # RSI 計算
+    # MACD
+    ema_12 = df['Close'].ewm(span=12, adjust=False).mean()
+    ema_26 = df['Close'].ewm(span=26, adjust=False).mean()
+    df['MACD_12_26_9'] = ema_12 - ema_26
+    df['MACDs_12_26_9'] = df['MACD_12_26_9'].ewm(span=9, adjust=False).mean()
+    df['MACDh_12_26_9'] = df['MACD_12_26_9'] - df['MACDs_12_26_9']
+    
+    # RSI
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False).mean()
     loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
     rs = gain / loss
     df['RSI_14'] = 100 - (100 / (1 + rs))
     
-    # 尋找支撐與壓力 (近20週期的高低點)
     df['Support'] = df['Low'].rolling(window=20).min()
     df['Resistance'] = df['High'].rolling(window=20).max()
     return df
 
-def run_rsi_support_backtest(df):
-    """進階策略：RSI背離修復與支撐測試 & 選擇權收租回測"""
+def run_daily_backtest(df, strategy_type):
+    """三大策略回測引擎 (含 Covered Call 收租避險邏輯)"""
     trade_log = []
     holding = False
     buy_price = 0
-    
-    # 選擇權模擬參數
-    put_strike = 0
-    expected_premium = 0
-    holding_min_price = 0
+    call_strike = 0
+    call_premium_pct = 1.5 # 假設每次賣出 Call 可收取 1.5% 權利金
     
     for i in range(1, len(df)):
         current = df.iloc[i]
         prev = df.iloc[i-1]
         date = df.index[i].strftime('%Y-%m-%d')
         
-        # 策略 1：多頭回檔至支撐且 RSI 進入超賣區後反彈 (勝率與盈虧比高)
-        is_uptrend = current['Close'] > current['SMA_60']
-        near_support = current['Close'] <= prev['Support'] * 1.03 # 距離支撐3%內
-        rsi_oversold_bounce = prev['RSI_14'] < 40 and current['RSI_14'] > prev['RSI_14']
+        buy_signal = False
+        sell_signal = False
+        reason = ""
         
-        if not holding:
-            if is_uptrend and near_support and rsi_oversold_bounce:
-                holding = True
-                buy_price = current['Close']
+        # --- 策略 1：MACD 動能共振 ---
+        if strategy_type == "MACD 動能共振":
+            if not holding and (prev['MACD_12_26_9'] <= prev['MACDs_12_26_9']) and (current['MACD_12_26_9'] > current['MACDs_12_26_9']) and (current['Close'] > current['SMA_20']):
+                buy_signal, reason = True, 'MACD金叉且站上20MA'
+            elif holding and ((current['MACD_12_26_9'] < current['MACDs_12_26_9']) or (current['Close'] < current['SMA_60'])):
+                sell_signal, reason = True, 'MACD死叉或跌破60MA'
                 
-                # 建立選擇權 Sell Put 部位：履約價設在現價下方 4% (價外4檔)
-                put_strike = buy_price * 0.96
-                expected_premium = buy_price * 0.012 # 預估收取 1.2% 的權利金
-                holding_min_price = current['Low']
-                
-                trade_log.append({
-                    'Date': date, 'Action': 'BUY', 'Stock Price': buy_price, 
-                    'Reason': '回測支撐且RSI反彈', 'Stock PnL(%)': 0, 
-                    'Opt Strike': round(put_strike, 2), 'Opt PnL(%)': 0, 'Opt Status': '建倉'
-                })
-        
-        elif holding:
-            holding_min_price = min(holding_min_price, current['Low'])
+        # --- 策略 2：VCP 形態突破 ---
+        elif strategy_type == "VCP 形態突破":
+            pivot = prev['Resistance'] # 前波高點
+            if not holding and (current['Close'] > pivot) and (current['Volume'] > 1.2 * current['Vol_SMA_20']) and (current['Close'] > current['SMA_60']):
+                buy_signal, reason = True, '帶量突破20日高點'
+            elif holding and (current['Close'] < current['SMA_20']):
+                sell_signal, reason = True, '跌破20MA趨勢線'
+
+        # --- 策略 3：RSI 支撐反彈 ---
+        elif strategy_type == "RSI 支撐反彈":
+            is_uptrend = current['Close'] > current['SMA_60']
+            near_support = current['Low'] <= prev['Support'] * 1.03
+            rsi_bounce = prev['RSI_14'] < 40 and current['RSI_14'] > prev['RSI_14']
             
-            # 賣出邏輯：RSI 超買(>70) 或是 跌破季線(停損)
-            if current['RSI_14'] > 70 or current['Close'] < current['SMA_60'] * 0.98:
-                holding = False
-                sell_price = current['Close']
+            if not holding and is_uptrend and near_support and rsi_bounce:
+                buy_signal, reason = True, '長多回檔支撐且RSI反彈'
+            elif holding and (current['RSI_14'] > 70 or current['Close'] < current['SMA_60'] * 0.98):
+                sell_signal, reason = True, 'RSI超買或跌破季線'
+
+        # --- 交易執行與損益計算 (結合 Covered Call) ---
+        if buy_signal:
+            holding = True
+            buy_price = current['Close']
+            call_strike = buy_price * 1.05 # 賣出價外 5% 的 Call
+            trade_log.append({'Date': date, 'Action': 'BUY', 'Price': buy_price, 'Reason': reason, 'Stock PnL(%)': 0, 'Call PnL(%)': 0, 'Total PnL(%)': 0})
+            
+        elif sell_signal:
+            holding = False
+            sell_price = current['Close']
+            
+            # 如果股價大漲超過 Call 履約價，股票會被收走 (封頂利潤)
+            if sell_price > call_strike:
+                stock_pnl = (call_strike - buy_price) / buy_price * 100
+                call_pnl = call_premium_pct
+                reason += " (暴漲達標，現股被Call走)"
+            else:
                 stock_pnl = (sell_price - buy_price) / buy_price * 100
+                call_pnl = call_premium_pct # 完整收租，抵禦部分跌幅
                 
-                # 計算選擇權 Sell Put 損益
-                if holding_min_price >= put_strike:
-                    opt_status = '安全收租'
-                    opt_pnl = 1.2 # 完整賺取 1.2% 權利金
-                else:
-                    opt_status = '跌破履約 (虧損或接盤)'
-                    # 若跌破，選擇權損失 = (現價 - 履約價) + 權利金。最高賺1.2%
-                    opt_raw_pnl = ((sell_price - put_strike) / buy_price * 100) + 1.2
-                    opt_pnl = min(1.2, opt_raw_pnl)
-                
-                trade_log.append({
-                    'Date': date, 'Action': 'SELL', 'Stock Price': sell_price, 
-                    'Reason': 'RSI超買或破線', 'Stock PnL(%)': round(stock_pnl, 2),
-                    'Opt Strike': round(put_strike, 2), 'Opt PnL(%)': round(opt_pnl, 2), 'Opt Status': opt_status
-                })
+            total_pnl = stock_pnl + call_pnl
+            trade_log.append({'Date': date, 'Action': 'SELL', 'Price': sell_price, 'Reason': reason, 'Stock PnL(%)': round(stock_pnl, 2), 'Call PnL(%)': round(call_pnl, 2), 'Total PnL(%)': round(total_pnl, 2)})
     
-    # 若最後一天仍持有
+    # 若最後一天仍持有，計算未實現損益
     if holding:
         last_price = df.iloc[-1]['Close']
-        stock_pnl = (last_price - buy_price) / buy_price * 100
-        holding_min_price = min(holding_min_price, df.iloc[-1]['Low'])
-        
-        if holding_min_price >= put_strike:
-            opt_status = '未實現 (安全區)'
-            opt_pnl = 1.2
+        if last_price > call_strike:
+            stock_pnl = (call_strike - buy_price) / buy_price * 100
         else:
-            opt_status = '未實現 (跌破履約)'
-            opt_pnl = min(1.2, ((last_price - put_strike) / buy_price * 100) + 1.2)
-
-        trade_log.append({
-            'Date': df.index[-1].strftime('%Y-%m-%d'), 'Action': 'HOLDING', 'Stock Price': last_price, 
-            'Reason': '持倉中', 'Stock PnL(%)': round(stock_pnl, 2),
-            'Opt Strike': round(put_strike, 2), 'Opt PnL(%)': round(opt_pnl, 2), 'Opt Status': opt_status
-        })
+            stock_pnl = (last_price - buy_price) / buy_price * 100
+        
+        call_pnl = call_premium_pct
+        total_pnl = stock_pnl + call_pnl
+        trade_log.append({'Date': df.index[-1].strftime('%Y-%m-%d'), 'Action': 'HOLDING', 'Price': last_price, 'Reason': '目前持倉中 (未實現)', 'Stock PnL(%)': round(stock_pnl, 2), 'Call PnL(%)': round(call_pnl, 2), 'Total PnL(%)': round(total_pnl, 2)})
         
     return pd.DataFrame(trade_log)
 
 def plot_chart(df, title, trade_log_df):
-    """繪製極簡文青風 K線圖與買賣點"""
+    """繪製 K線圖與買賣點"""
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
 
-    # K線與均線、支撐線
     fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K線',
                                  increasing_line_color='#E74C3C', decreasing_line_color='#27AE60'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['SMA_60'], line=dict(color='#9B59B6', width=1.5), name='60MA (趨勢線)'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['Support'], line=dict(color='#95A5A6', width=1, dash='dot'), name='20日支撐'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], line=dict(color='#3498DB', width=1.5), name='20MA'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['SMA_60'], line=dict(color='#9B59B6', width=1.5), name='60MA'), row=1, col=1)
 
     # 標示買賣點位
     if not trade_log_df.empty:
         buys = trade_log_df[trade_log_df['Action'] == 'BUY']
         sells = trade_log_df[trade_log_df['Action'].isin(['SELL', 'HOLDING'])]
         
-        fig.add_trace(go.Scatter(x=pd.to_datetime(buys['Date']), y=buys['Stock Price'] * 0.95, mode='markers+text', 
-                                 marker=dict(symbol='triangle-up', size=12, color='#E74C3C'), name='進場', text="買", textposition="bottom center"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=pd.to_datetime(sells['Date']), y=sells['Stock Price'] * 1.05, mode='markers+text', 
-                                 marker=dict(symbol='triangle-down', size=12, color='#27AE60'), name='出場', text="賣", textposition="top center"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=pd.to_datetime(buys['Date']), y=buys['Price'] * 0.95, mode='markers+text', 
+                                 marker=dict(symbol='triangle-up', size=12, color='#E74C3C'), name='買進點', text="買", textposition="bottom center"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=pd.to_datetime(sells['Date']), y=sells['Price'] * 1.05, mode='markers+text', 
+                                 marker=dict(symbol='triangle-down', size=12, color='#27AE60'), name='賣出/現價', text="賣", textposition="top center"), row=1, col=1)
 
-    # RSI
-    fig.add_trace(go.Scatter(x=df.index, y=df['RSI_14'], line=dict(color='#3498DB', width=1.5), name='RSI(14)'), row=2, col=1)
-    fig.add_hline(y=70, line_dash="dot", line_color="red", row=2, col=1, annotation_text="超買區")
-    fig.add_hline(y=30, line_dash="dot", line_color="green", row=2, col=1, annotation_text="超賣區")
+    fig.add_trace(go.Bar(x=df.index, y=df['MACDh_12_26_9'], name='MACD Hist', marker_color='#BDC3C7'), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['MACD_12_26_9'], line=dict(color='#E74C3C', width=1), name='MACD'), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['MACDs_12_26_9'], line=dict(color='#2980B9', width=1), name='Signal'), row=2, col=1)
 
     fig.update_layout(title=title, xaxis_rangeslider_visible=False, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
                       font=dict(family="Noto Serif TC", size=12, color="#2C3E50"), margin=dict(l=20, r=20, t=50, b=20))
@@ -176,75 +179,140 @@ with st.sidebar:
     st.header("🔍 標的探索")
     ticker_input = st.text_input("輸入美股代碼 (如 AAPL, NVDA, SPY)", "AAPL").upper()
     
+    # --- 新增：三大策略自由切換 ---
     st.markdown("---")
-    st.write("📖 **全新策略說明**")
-    st.write("已升級為 **「RSI 背離與支撐確認策略」**。此策略專注於多頭趨勢(站上季線)中的回檔。當股價靠近20日支撐，且 RSI 從低檔反彈時，發出買進訊號並模擬 **Sell Put (賣出賣權)** 收取權利金。")
+    st.header("⚙️ 選擇分析策略")
+    strategy_choice = st.selectbox(
+        "選擇回測與買點判定邏輯：",
+        ("MACD 動能共振", "VCP 形態突破", "RSI 支撐反彈")
+    )
+    
+    # ---------------- 讀取機器人掃描的推薦名單 ----------------
+    st.markdown("---")
+    st.header("🎯 S&P 500 共振推薦名單")
+    st.write("以下為系統背景掃描，符合動能共振之潛力標的：")
+    
+    try:
+        if os.path.exists('signals.csv'):
+            signals_df = pd.read_csv('signals.csv')
+            if not signals_df.empty:
+                st.dataframe(signals_df[['代碼', '當前價格', '支撐位 (建議 Sell Put 價)']], hide_index=True)
+                st.caption(f"最後更新日期：{signals_df.iloc[0]['日期']}")
+                st.info("💡 提示：點擊上方代碼輸入框，即可查看該檔股票的詳細回測與圖表。")
+            else:
+                st.write("今日市場無符合多頭共振條件之標的。")
+        else:
+            st.warning("尚未偵測到 `signals.csv`。")
+            st.caption("請確認 GitHub Actions 的掃描腳本是否已經成功執行並寫入資料庫。")
+    except Exception as e:
+        st.error(f"讀取推薦清單時發生錯誤: {e}")
+    # --------------------------------------------------------------
+        
+    st.markdown("---")
+    st.write("📖 **策略說明**")
+    st.write("自動判定起漲點買進現股，並結合 **Covered Call (賣出買權)** 策略，在鎖定最大風險的情況下，穩定收取權利金避險。")
 
+# 以下為單檔股票詳細分析與圖表繪製邏輯
 if ticker_input:
     with st.spinner('正在從喧囂的市場中擷取數據...'):
-        df_daily_raw, news_data, inst_holders = fetch_data(ticker_input)
+        df_daily_raw, df_60m_raw, news_data, inst_holders = fetch_data(ticker_input)
         
     if not df_daily_raw.empty:
         df_daily = apply_technical_analysis(df_daily_raw.copy())
-        trade_log_df = run_rsi_support_backtest(df_daily)
+        
+        # 執行歷史回測 (傳入選擇的策略)
+        trade_log_df = run_daily_backtest(df_daily, strategy_choice)
         
         current_price = df_daily.iloc[-1]['Close']
-        support = df_daily.iloc[-1]['Support']
-        put_strike = current_price * 0.96 # 建議價外4%
-        est_premium = current_price * 0.012 # 預估權利金
+        
+        # Covered Call 最佳參數配置
+        call_strike = current_price * 1.05 # 賣出價外 5% 的 Call
+        est_premium = current_price * 0.015 # 預期收取 1.5% 權利金
         
         # 儀表板
-        st.markdown("### 🧭 今日決策與最佳收租配置")
+        st.markdown(f"### 🧭 今日觀點與決策 ── 基於【{strategy_choice}】")
         col1, col2 = st.columns(2)
         with col1:
             st.markdown(f"""
             <div class="metric-card">
                 <h4>當前股價</h4><h2>${current_price:.2f}</h2>
-                <p>近期強支撐: ${support:.2f}</p>
                 <hr>
-                <h4 style='color:#E74C3C;'>🛡️ 最佳收租策略 (Sell Put 賣出賣權)</h4>
-                <p>建議履約價：<b>${put_strike:.0f} (價外 4%)</b></p>
-                <p>單口預估收租：<b>${est_premium*100:.0f} 美金</b> (約 1.2% 報酬)</p>
+                <h4 style='color:#3498DB;'>🛡️ 最佳避險收租 (Covered Call 賣出買權)</h4>
+                <p>若現價買進，建議賣出履約價：<b class='highlight'>${call_strike:.0f}</b> (價外 5%)</p>
+                <p>單口預期收租金額：<b class='highlight'>${est_premium*100:.0f} 美金</b> (提供約 1.5% 跌幅緩衝)</p>
             </div>
             """, unsafe_allow_html=True)
             
         with col2:
-            # 統計回測數據
+            # 計算歷史勝率 (以 Total PnL 計算)
+            win_rate = "無交易"
             if not trade_log_df.empty and len(trade_log_df[trade_log_df['Action'] == 'SELL']) > 0:
                 sells = trade_log_df[trade_log_df['Action'] == 'SELL']
-                stock_wins = len(sells[sells['Stock PnL(%)'] > 0])
-                opt_wins = len(sells[sells['Opt PnL(%)'] > 0])
-                total_trades = len(sells)
+                wins = len(sells[sells['Total PnL(%)'] > 0])
+                win_rate = f"{(wins / len(sells)) * 100:.1f}%"
                 
-                stock_win_rate = f"{(stock_wins / total_trades) * 100:.1f}%"
-                opt_win_rate = f"{(opt_wins / total_trades) * 100:.1f}%"
-                
-                stock_pnl = sells['Stock PnL(%)'].sum()
-                opt_pnl = sells['Opt PnL(%)'].sum()
+                stock_total_pnl = sells['Stock PnL(%)'].sum()
+                call_total_pnl = sells['Call PnL(%)'].sum()
+                total_pnl = sells['Total PnL(%)'].sum()
             else:
-                stock_win_rate, opt_win_rate = "N/A", "N/A"
-                stock_pnl, opt_pnl = 0.0, 0.0
+                stock_total_pnl, call_total_pnl, total_pnl = 0.0, 0.0, 0.0
             
             st.markdown(f"""
             <div class="metric-card">
-                <h4>近兩年策略回測表現</h4>
-                <p><b>買現股波段：</b> 總利潤 <span class='profit-text'>{stock_pnl:.1f}%</span> (勝率 {stock_win_rate})</p>
-                <p><b>Sell Put 收租：</b> 總利潤 <span class='profit-text'>{opt_pnl:.1f}%</span> (勝率 {opt_win_rate})</p>
-                <p style="font-size:0.9em; color:#7F8C8D;">*Sell Put 勝率通常更高，因為即使盤整或小跌(未破履約價)，仍可完整收租。</p>
+                <h4>近一年波段回測 (含選擇權避險)</h4>
+                <h2>總績效: {total_pnl:.2f}% (勝率: {win_rate})</h2>
+                <p>現股價差貢獻: <b>{stock_total_pnl:.2f}%</b></p>
+                <p>賣出 Call 權利金貢獻: <b>{call_total_pnl:.2f}%</b></p>
             </div>
             """, unsafe_allow_html=True)
 
-        # 圖表
+        # K線圖 (帶買賣點)
         st.markdown("---")
-        st.markdown("### 📊 RSI 支撐共振圖表")
-        # 只顯示近 200 天讓畫面乾淨
-        st.plotly_chart(plot_chart(df_daily.tail(200), f"{ticker_input} - 進出場與動能分析", trade_log_df), use_container_width=True)
+        st.markdown("### 📊 價格脈絡與買賣點標示")
+        st.plotly_chart(plot_chart(df_daily.tail(150), f"{ticker_input} - 歷史交易點位", trade_log_df), use_container_width=True)
 
-        # 交易明細
-        st.markdown("### 📝 回測交易與收租明細")
+        # 交易明細與下載
+        st.markdown("### 📝 回測交易明細與原因")
         if not trade_log_df.empty:
             st.dataframe(trade_log_df, use_container_width=True)
             csv = trade_log_df.to_csv(index=False).encode('utf-8-sig')
-            st.download_button(label="📥 下載交易明細 (CSV)", data=csv, file_name=f'{ticker_input}_rsi_options_log.csv', mime='text/csv')
+            st.download_button(label="📥 下載交易明細 (CSV)", data=csv, file_name=f'{ticker_input}_covered_call_log.csv', mime='text/csv')
         else:
-            st.write("過去兩年無符合條件之交易訊號。")
+            st.write("過去一年無符合條件之交易訊號。")
+
+        # 籌碼與題材區
+        st.markdown("---")
+        col_news, col_chips = st.columns([1, 1])
+        
+        with col_news:
+            st.markdown("### 📰 近期題材與市場絮語")
+            if news_data:
+                for n in news_data:
+                    # 暴力破解 Yahoo API 的各種巢狀結構
+                    title = n.get('title') or n.get('content', {}).get('title') or '市場快訊'
+                    link = n.get('link') or n.get('content', {}).get('clickThroughUrl', {}).get('url') or '#'
+                    publisher = n.get('publisher') or n.get('content', {}).get('provider', {}).get('displayName') or '財經新聞'
+                    
+                    st.markdown(f"**[{title}]({link})**")
+                    st.caption(f"{publisher}")
+            else:
+                st.write("目前市場平靜，無特別新聞。")
+                
+        with col_chips:
+            st.markdown("### 💼 籌碼動向 (自動推算法人與散戶)")
+            if inst_holders is not None and not inst_holders.empty and 'pctHeld' in inst_holders.columns:
+                # 分析籌碼動向
+                top_inst_pct = inst_holders['pctHeld'].sum()
+                retail_pct = 1 - top_inst_pct
+                sentiment = "偏多 (機構近期加碼)" if inst_holders['pctChange'].mean() > 0 else "偏空 (機構近期減碼)"
+                
+                st.info(f"📊 **籌碼推算：** 前幾大機構掌控約 **{top_inst_pct:.1%}**，散戶約佔 **{retail_pct:.1%}**。整體法人動向：**{sentiment}**")
+                
+                # 顯示表格
+                expected_cols = ['Holder', 'pctHeld', 'Shares', 'pctChange']
+                display_df = inst_holders[expected_cols] if set(expected_cols).issubset(inst_holders.columns) else inst_holders
+                st.dataframe(display_df.head(5), hide_index=True)
+            else:
+                st.write("暫無機構籌碼資料，或資料結構變更。")
+    else:
+        st.error("無法尋獲該代碼的軌跡，請確認美股代碼是否正確。")
