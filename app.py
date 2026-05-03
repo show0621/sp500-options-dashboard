@@ -260,7 +260,13 @@ if ticker_input:
         with col_chips:
             st.markdown("### 💼 籌碼分析 (機構動向)")
             if inst_holders is not None and not inst_holders.empty:
-                st.dataframe(inst_holders[['Holder', 'Shares', '% Out']].head(5), hide_index=True)
+                expected_columns = ['Holder', 'Shares', '% Out']
+                # 防呆機制：檢查 Yahoo Finance 回傳的資料是否包含預期欄位
+                if set(expected_columns).issubset(inst_holders.columns):
+                    st.dataframe(inst_holders[expected_columns].head(5), hide_index=True)
+                else:
+                    st.write("資料結構已變更，以下為原始機構數據：")
+                    st.dataframe(inst_holders.head(5), hide_index=True)
             else:
                 st.write("暫無機構籌碼資料。")
     else:
