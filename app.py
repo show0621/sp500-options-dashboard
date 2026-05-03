@@ -9,7 +9,7 @@ import os
 # ==========================================
 # 網頁與視覺風格設定
 # ==========================================
-st.set_page_config(page_title="Alpha 櫻・美股共振展望", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Alpha美股莊家策略", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown("""
     <style>
