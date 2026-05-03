@@ -176,7 +176,7 @@ def plot_chart(df, title, trade_log_df):
     """繪製 K線圖與買賣點"""
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
 
-    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K線',
+    fig.add_trace(go.Candlestick(x=df.index, open=df.Open, high=df.High, low=df.Low, close=df.Close, name='K線',
                                  increasing_line_color='#E74C3C', decreasing_line_color='#27AE60'), row=1, col=1)
     
     # 繪製布林通道
@@ -338,9 +338,12 @@ if ticker_input:
             st.markdown("### 📰 近期題材與市場絮語")
             if news_data:
                 for n in news_data:
-                    title = n.get('title') or n.get('content', {}).get('title') or '市場快訊'
-                    link = n.get('link') or n.get('content', {}).get('clickThroughUrl', {}).get('url') or '#'
-                    publisher = n.get('publisher') or n.get('content', {}).get('provider', {}).get('displayName') or '財經新聞'
+                    # 解決 AttributeError: 
+                    # 使用 (n.get('content') or {}) 確保即使 'content' 鍵的值為 None，也能安全調用 .get()
+                    c = n.get('content') or {}
+                    title = n.get('title') or c.get('title') or '市場快訊'
+                    link = n.get('link') or c.get('clickThroughUrl', {}).get('url') or '#'
+                    publisher = n.get('publisher') or c.get('provider', {}).get('displayName') or '財經新聞'
                     st.markdown(f"**[{title}]({link})**")
                     st.caption(f"{publisher}")
             else:
