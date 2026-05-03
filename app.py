@@ -338,15 +338,22 @@ if ticker_input:
             st.markdown("### 📰 近期題材與市場絮語")
             if news_data:
                 for n in news_data:
-                    # 安全導航修正：採用「強制轉字典」模式解決 AttributeError
-                    # yfinance 的內容有時 key 存在但值為 None，這會導致 .get(key, {}) 失效
+                    # 強化連結提取邏輯
                     c = n.get('content') or {}
                     title = n.get('title') or c.get('title') or '市場快訊'
-                    # 針對 clickThroughUrl 進行二重空值檢查
-                    link = n.get('link') or (c.get('clickThroughUrl') or {}).get('url') or '#'
-                    # 針對 provider 進行二重空值檢查
-                    publisher = n.get('publisher') or (c.get('provider') or {}).get('displayName') or '財經新聞'
-                    st.markdown(f"**[{title}]({link})**")
+                    
+                    # 依序偵測 link -> clickThroughUrl -> canonicalUrl
+                    link = n.get('link') or \
+                           c.get('clickThroughUrl', {}).get('url') or \
+                           c.get('canonicalUrl', {}).get('url') or None
+                    
+                    publisher = n.get('publisher') or c.get('provider', {}).get('displayName') or '財經新聞'
+                    
+                    # 如果有連結，顯示可點擊標題；若無，顯示一般文字
+                    if link:
+                        st.markdown(f"**[{title}]({link})**")
+                    else:
+                        st.markdown(f"**{title}** (暫無連結)")
                     st.caption(f"{publisher}")
             else:
                 st.write("目前市場平靜，無特別新聞。")
