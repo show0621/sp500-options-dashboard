@@ -2,17 +2,27 @@ import yfinance as yf
 import pandas as pd
 import datetime
 import os
+import requests  # 新增這行：用來處理偽裝瀏覽器的請求
 
 # 1. 獲取 S&P 500 股票代碼
 def get_sp500_tickers():
     url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-    table = pd.read_html(url)[0]
+    
+    # 加上 headers，偽裝成正常的 Windows Chrome 瀏覽器，避免被維基百科阻擋 (解決 403 Forbidden)
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+    
+    # 先用 requests 抓取網頁原始碼，再丟給 pandas 解析
+    response = requests.get(url, headers=headers)
+    table = pd.read_html(response.text)[0]
+    
     tickers = table['Symbol'].tolist()
-    # 替換掉 Yahoo Finance 不吃的特殊符號
+    # 替換掉 Yahoo Finance 不吃的特殊符號 (如 BRK.B 變成 BRK-B)
     tickers = [t.replace('.', '-') for t in tickers]
     return tickers
 
-# 2. 技術分析邏輯 (與我們網頁上的相同)
+# 2. 技術分析邏輯
 def check_buy_signal(df_daily, df_60m):
     if df_daily.empty or df_60m.empty or len(df_daily) < 20:
         return False, 0, 0
@@ -48,8 +58,9 @@ def run_scanner():
     print("開始掃描 S&P 500...")
     tickers = get_sp500_tickers()
     
-    # 為了避免被 Yahoo 封鎖，這裡先設定只抓前 50 檔做測試，你可以拿掉 [:50] 掃描全部
-    tickers_to_scan = tickers[:50] 
+    # 【注意】目前設定掃描全部 S&P500 股票。
+    # 若被 Yahoo Finance 暫時限制 IP，可以改回 tickers_to_scan = tickers[:50] 進行測試
+    tickers_to_scan = tickers 
     
     buy_list = []
     
@@ -59,9 +70,6 @@ def run_scanner():
             data = yf.Ticker(ticker)
             df_daily = data.history(period="6mo", interval="1d")
             df_60m = data.history(period="1mo", interval="60m")
-            
-            # 這裡可以加入將 df_60m 存入本地 CSV 累積的邏輯
-            # 例如: df_60m.to_csv(f"data/{ticker}_60m.csv", mode='a')
             
             is_buy, price, support = check_buy_signal(df_daily, df_60m)
             
@@ -76,7 +84,7 @@ def run_scanner():
         except Exception as e:
             print(f"{ticker} 抓取失敗: {e}")
             
-    # 將結果存成 CSV 給 Streamlit 讀取
+    # 將結果存成 CSV
     df_result = pd.DataFrame(buy_list)
     df_result.to_csv('signals.csv', index=False, encoding='utf-8-sig')
     print(f"掃描完成！共發現 {len(buy_list)} 檔符合條件標的，已儲存至 signals.csv")
