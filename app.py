@@ -1,7 +1,6 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import datetime
@@ -61,22 +60,33 @@ def fetch_data(ticker_symbol):
     return df_daily, df_60m, news, inst_holders
 
 def apply_technical_analysis(df):
-    """計算技術指標與形態"""
+    """使用原生 Pandas 計算技術指標與形態 (避免雲端套件衝突)"""
     if df.empty or len(df) < 50:
         return df
     
-    # 動能指標
-    df.ta.macd(fast=12, slow=26, signal=9, append=True)
-    df.ta.rsi(length=14, append=True)
-    df.ta.sma(length=20, append=True)
-    df.ta.sma(length=60, append=True)
+    # 計算 SMA (簡單移動平均)
+    df['SMA_20'] = df['Close'].rolling(window=20).mean()
+    df['SMA_60'] = df['Close'].rolling(window=60).mean()
+    
+    # 計算 MACD
+    ema_12 = df['Close'].ewm(span=12, adjust=False).mean()
+    ema_26 = df['Close'].ewm(span=26, adjust=False).mean()
+    df['MACD_12_26_9'] = ema_12 - ema_26
+    df['MACDs_12_26_9'] = df['MACD_12_26_9'].ewm(span=9, adjust=False).mean() # Signal Line
+    df['MACDh_12_26_9'] = df['MACD_12_26_9'] - df['MACDs_12_26_9'] # Histogram
+    
+    # 計算 RSI
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False).mean()
+    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
+    rs = gain / loss
+    df['RSI_14'] = 100 - (100 / (1 + rs))
     
     # 尋找支撐與壓力 (近20週期的高低點)
     df['Support'] = df['Low'].rolling(window=20).min()
     df['Resistance'] = df['High'].rolling(window=20).max()
     
     # 簡單形態辨識 (紅三兵 - 連續三根實體紅K且創新高)
-    # pandas_ta 內建 cdl_pattern，這裡以簡單邏輯實作確保雲端相容性
     df['Red_Three_Soldiers'] = (
         (df['Close'] > df['Open']) & 
         (df['Close'].shift(1) > df['Open'].shift(1)) & 
@@ -90,7 +100,7 @@ def apply_technical_analysis(df):
 def generate_signals(df_daily, df_60m):
     """60K與日K動能共振與策略建議"""
     if df_daily.empty or df_60m.empty:
-        return "資料不足", 0, 0, 0, "無"
+        return "資料不足", 0, 0, 0, "無", ""
 
     last_d = df_daily.iloc[-1]
     last_60 = df_60m.iloc[-1]
@@ -175,6 +185,7 @@ if ticker_input:
         df_daily_raw, df_60m_raw, news_data, inst_holders = fetch_data(ticker_input)
         
     if not df_daily_raw.empty:
+        # 使用修正過的原生 Pandas 函數計算
         df_daily = apply_technical_analysis(df_daily_raw.copy())
         df_60m = apply_technical_analysis(df_60m_raw.copy())
         
@@ -229,10 +240,20 @@ if ticker_input:
             st.markdown("### 📰 近期題材與市場絮語")
             if news_data:
                 for n in news_data:
-                    # 處理時間戳記
-                    pub_time = datetime.datetime.fromtimestamp(n['providerPublishTime']).strftime('%Y-%m-%d %H:%M')
-                    st.markdown(f"**[{n['title']}]({n['link']})**")
-                    st.caption(f"{n['publisher']} - {pub_time}")
+                    # 使用 .get() 安全地取得資料，避免報錯
+                    title = n.get('title', '市場快訊')
+                    link = n.get('link', '#')
+                    publisher = n.get('publisher', '財經新聞')
+                    
+                    # 安全處理時間戳記
+                    pub_time_raw = n.get('providerPublishTime')
+                    time_str = ""
+                    if pub_time_raw:
+                        formatted_time = datetime.datetime.fromtimestamp(pub_time_raw).strftime('%Y-%m-%d %H:%M')
+                        time_str = f" - {formatted_time}"
+                        
+                    st.markdown(f"**[{title}]({link})**")
+                    st.caption(f"{publisher}{time_str}")
             else:
                 st.write("目前市場平靜，無特別新聞。")
                 
